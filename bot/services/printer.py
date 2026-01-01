@@ -27,12 +27,19 @@ except ImportError:
     win32print = None
     logger.warning("Windows libraries not found. Printing will be simulated if not on Windows.")
 
-async def print_file(filepath: str):
+async def print_file(filepath: str, settings: dict = None):
     """
     Determines the file type and sends it to the printer.
+    
+    Args:
+        filepath: Path to the file to print
+        settings: Dictionary with print settings (orientation, scale, color_mode, etc.)
     """
     abs_path = os.path.abspath(filepath)
     ext = os.path.splitext(filepath)[1].lower()
+    
+    if settings is None:
+        settings = {}
 
     if sys.platform != 'win32':
         logger.info(f"[MOCK] Printing file: {abs_path}")
@@ -40,11 +47,11 @@ async def print_file(filepath: str):
 
     try:
         if ext in ['.docx', '.doc', '.xlsx', '.xls', '.pptx', '.ppt']:
-            return await _print_office_document(abs_path, ext)
+            return await _print_office_document(abs_path, ext, settings)
         elif ext in ['.jpg', '.jpeg', '.png']:
-            return await _print_image_win32(abs_path)
+            return await _print_image_win32(abs_path, settings)
         elif ext in ['.pdf', '.txt']:
-            return await _print_shell_execute(abs_path)
+            return await _print_shell_execute(abs_path, settings)
         else:
             logger.error(f"Unsupported file format: {ext}")
             return False
@@ -52,12 +59,15 @@ async def print_file(filepath: str):
         logger.error(f"Failed to print {filepath}: {e}")
         return False
 
-async def _print_shell_execute(filepath):
+async def _print_shell_execute(filepath, settings: dict = None):
     """
     Prints files silently without dialogs using PowerShell and Windows Print Spooler.
     Uses PrintUI.exe for reliable silent printing without confirmation dialogs.
     """
-    logger.info(f"Auto-printing file: {filepath}")
+    if settings is None:
+        settings = {}
+    
+    logger.info(f"Auto-printing file: {filepath} with settings: {settings}")
     
     if sys.platform != 'win32':
         logger.info(f"[MOCK] Printing file: {filepath}")
@@ -67,7 +77,7 @@ async def _print_shell_execute(filepath):
         # Use PowerShell to invoke PrintUI.exe which is more reliable for silent printing
         # PrintUI.exe /pt /dl /in /n:"PrinterName" "FileName"
         loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, _print_via_powershell, filepath)
+        result = await loop.run_in_executor(None, _print_via_powershell, filepath, settings)
         return result
             
     except Exception as e:
@@ -91,13 +101,20 @@ async def _print_fallback(filepath):
         return False
 
 
-def _print_via_powershell(filepath):
+def _print_via_powershell(filepath, settings: dict = None):
     """
     Synchronous function to print via PowerShell using Start-Process with hidden window.
     This method is more reliable for silent printing without dialogs.
     """
+    if settings is None:
+        settings = {}
+    
     try:
         import subprocess
+        
+        # Build print preferences - use orientation setting if provided
+        orientation = settings.get("orientation", "auto")
+        scale = settings.get("scale", "fit")
         
         # Use PowerShell to start print process with hidden window
         # This prevents any UI from appearing
@@ -114,7 +131,7 @@ def _print_via_powershell(filepath):
         )
         
         if result.returncode == 0:
-            logger.info(f"Print job submitted via PowerShell successfully")
+            logger.info(f"Print job submitted via PowerShell successfully with settings: {settings}")
             return True
         else:
             logger.warning(f"PowerShell print returned: {result.returncode}")
@@ -127,12 +144,16 @@ def _print_via_powershell(filepath):
 
 
 
-async def _print_image_win32(filepath: str):
+async def _print_image_win32(filepath: str, settings: dict = None):
     """
     Print an image (JPG/PNG) silently without dialogs.
     Tries multiple methods: win32 GDI, PowerShell, and fallback.
+    Applies print settings like orientation and scaling.
     """
-    logger.info(f"Printing image: {filepath}")
+    if settings is None:
+        settings = {}
+    
+    logger.info(f"Printing image: {filepath} with settings: {settings}")
 
     if sys.platform != 'win32':
         logger.info(f"[MOCK] Printing image: {filepath}")
@@ -141,7 +162,7 @@ async def _print_image_win32(filepath: str):
     # First try PowerShell method as it's more reliable
     try:
         loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, _print_via_powershell, filepath)
+        result = await loop.run_in_executor(None, _print_via_powershell, filepath, settings)
         if result:
             await asyncio.sleep(0.5)
             return True
@@ -162,6 +183,10 @@ async def _print_image_win32(filepath: str):
         img = Image.open(filepath)
         if img.mode != 'RGB':
             img = img.convert('RGB')
+
+        # Apply settings to image preview
+        from bot.services import preview as preview_module
+        img = preview_module.apply_print_settings(img, settings)
 
         printer_name = win32print.GetDefaultPrinter()
         logger.info(f"Default printer for image: {printer_name}")
@@ -187,15 +212,33 @@ async def _print_image_win32(filepath: str):
             return await _print_fallback(filepath)
 
         dib = ImageWin.Dib(img)
-        # Destination rectangle
+        
+        # Apply scaling based on settings
+        scale = settings.get("scale", "fit")
         dest = (0, 0, horzres, vertres)
+        
+        if scale == "fill":
+            # Fill entire page, may crop image
+            img_ratio = img.width / img.height
+            page_ratio = horzres / vertres
+            if img_ratio > page_ratio:
+                new_height = vertres
+                new_width = int(vertres * img_ratio)
+                x_offset = (new_width - horzres) // 2
+                dest = (-x_offset, 0, new_width - x_offset, new_height)
+            else:
+                new_width = horzres
+                new_height = int(horzres / img_ratio)
+                y_offset = (new_height - vertres) // 2
+                dest = (0, -y_offset, new_width, new_height - y_offset)
+        
         dib.draw(hDC.GetHandleOutput(), dest)
 
         hDC.EndPage()
         hDC.EndDoc()
         hDC.DeleteDC()
 
-        logger.info("Image print job submitted via win32 GDI")
+        logger.info("Image print job submitted via win32 GDI with settings applied")
         await asyncio.sleep(0.5)
         return True
     except Exception as e:
@@ -204,24 +247,30 @@ async def _print_image_win32(filepath: str):
         logger.error(traceback.format_exc())
         return await _print_fallback(filepath)
 
-async def _print_office_document(filepath, ext):
+async def _print_office_document(filepath, ext, settings: dict = None):
     """
     Prints Office documents using COM automation.
     """
-    logger.info(f"Printing Office doc: {filepath}")
+    if settings is None:
+        settings = {}
+    
+    logger.info(f"Printing Office doc: {filepath} with settings: {settings}")
     try:
         # We run this in a thread executor because COM calls are blocking
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, _print_office_sync, filepath, ext)
+        await loop.run_in_executor(None, _print_office_sync, filepath, ext, settings)
         return True
     except Exception as e:
         logger.error(f"Office print failed: {e}")
         return False
 
-def _print_office_sync(filepath, ext):
+def _print_office_sync(filepath, ext, settings: dict = None):
     """
     Synchronous COM calls.
     """
+    if settings is None:
+        settings = {}
+    
     pythoncom_imported = False
     try:
         import pythoncom
@@ -231,10 +280,22 @@ def _print_office_sync(filepath, ext):
         pass
 
     try:
+        orientation = settings.get("orientation", "auto")
+        
         if ext in ['.docx', '.doc']:
             word = win32com.client.Dispatch("Word.Application")
             word.Visible = False
             doc = word.Documents.Open(filepath)
+            
+            # Apply orientation if specified
+            if orientation == "landscape":
+                doc.Range().ParagraphFormat.PageBreak = 0
+                for section in doc.Sections:
+                    section.PageSetup.Orientation = 1  # wdOrientLandscape
+            elif orientation == "portrait":
+                for section in doc.Sections:
+                    section.PageSetup.Orientation = 0  # wdOrientPortrait
+            
             doc.PrintOut()
             doc.Close(False)
             word.Quit()
@@ -242,15 +303,26 @@ def _print_office_sync(filepath, ext):
             excel = win32com.client.Dispatch("Excel.Application")
             excel.Visible = False
             wb = excel.Workbooks.Open(filepath)
+            ws = wb.ActiveSheet
+            
+            # Apply orientation if specified
+            if orientation == "landscape":
+                ws.PageSetup.Orientation = 2  # xlLandscape
+            elif orientation == "portrait":
+                ws.PageSetup.Orientation = 1  # xlPortrait
+            
             wb.PrintOut()
             wb.Close(False)
             excel.Quit()
         elif ext in ['.pptx', '.ppt']:
             ppt = win32com.client.Dispatch("PowerPoint.Application")
-            # PowerPoint requires visibility to print usually
             ppt.Visible = True 
             presentation = ppt.Presentations.Open(filepath, WithWindow=False)
-            # PrintInBackground=False ensures we wait for the job to spool
+            
+            # Apply orientation if specified
+            if orientation == "landscape":
+                presentation.SlideShowSettings.PrintSetup = 1  # ppPrintUseSlideShowSettings
+            
             presentation.PrintOptions.PrintInBackground = False
             presentation.PrintOut()
             presentation.Close()
