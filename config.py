@@ -1,7 +1,7 @@
 import os
 
 # Telegram Bot Token
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "***REDACTED***")
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 
 # Allowed User IDs (comma separated string)
 ALLOWED_USERS_ENV = os.getenv("ALLOWED_USERS", "")
